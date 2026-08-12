@@ -1,0 +1,61 @@
+name: docker-cluster
+
+services:
+  app:
+    build:
+      context: ./docker cluster
+      dockerfile: Dockerfile
+    image: docker-cluster-app
+    deploy:
+      replicas: 5
+    depends_on:
+      - mongo
+      - redis
+    environment:
+      MONGO_URI: mongodb://mongo:27017/mydatabase
+      REDIS_URL: redis://redis:6379
+    networks:
+      - docker-cluster-network
+
+  mongo:
+    image: mongodb/mongodb-community-server:8.0-ubi9-slim
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    networks:
+      - docker-cluster-network
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - docker-cluster-network
+
+  dashboard:
+    build:
+      context: ./cluster-dashboard
+      dockerfile: Dockerfile
+    image: cluster-dashboard
+    restart: unless-stopped
+    depends_on:
+      - app
+    environment:
+      MONGO_URI: mongodb://mongo:27017/mydatabase
+      REDIS_URL: redis://redis:6379
+      REPLICA_HOSTS: docker-cluster-app-1:3000,docker-cluster-app-2:3000,docker-cluster-app-3:3000,docker-cluster-app-4:3000,docker-cluster-app-5:3000
+    ports:
+      - "8081:8081"
+    networks:
+      - docker-cluster-network
+
+networks:
+  docker-cluster-network:
+    name: docker-cluster-network
+
+volumes:
+  mongo-data:
+  redis-data:

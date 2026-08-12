@@ -1,0 +1,92 @@
+# Docker Desktop on macOS: parallel outbound connection stalls (vpnkit)
+
+> Explanation of why the cluster dashboard intermittently failed to poll all 5
+> app replicas, and what the diagnostic trail showed.
+
+## Why the failures happened
+
+The dashboard polls all 5 replicas. Originally it fired all requests in parallel
+with `Promise.all([...])`. Standalone test scripts doing the exact same thing ran
+flawlessly (325 requests, 0 failures), but inside the long-running dashboard
+server process, requests would intermittently die with `AbortError`/timeout at
+~15ms — far faster than the configured 2000ms timeout, so it was never a real
+network timeout.
+
+## How Docker Desktop networking works on macOS
+
+Docker containers run inside a **Linux VM** (via HyperKit / Virtualization.framework
+on macOS). The VM has its own kernel network stack inside; to let containers talk
+to the host, Docker Desktop runs **vpnkit**, a user-space networking daemon
+between the VM and your Mac's real network interface.
+
+Critically, none of it is kernel-native. Every packet from a container crosses:
+
+    container → bridge → inside VM → vpnkit (user-space proxy) → macOS network stack
+
+Everything normally handled by the kernel (TCP connection establishment, retries,
+fragmentation) is instead simulated in user space. User-space network stacks are
+single-threaded event loops with a one-at-a-time event pump.
+
+## Why parallel connections stall
+
+When a server fires many outbound sockets at once, vpnkit has to:
+
+1. Accept connection-attempt events in quick succession
+2. Resolve DNS for each hostname (via the Docker embedded DNS, 127.0.0.11, which
+   on macOS forwards through vpnkit too)
+3. Establish TCP handshakes for each
+4. Pump data through its user-space TCP stack
+
+All that work is serialized through vpnkit's event loop. Under a burst:
+
+- The event pump gets saturated — DNS lookups are especially heavy because they
+  are synchronous round-trips through dotted DNS forwarding.
+- Timeouts can fire before queued work is processed — a handshake queued behind
+  other events can miss internal deadlines.
+
+The result is not a network error (no SYN discard). The request simply **never
+completes**; the socket times out or stalls. This matches what we saw: requests
+dying at ~15ms, not at the configured 2000ms.
+
+## The diagnostic trail
+
+| Test | What we ran | Result |
+|------|-------------|--------|
+| `wget` in container (sequential, one-shot) | `for i in 1..5; wget` | 5/5, ~100ms each |
+| `node -e` one-shot script (parallel) | single process, exits quickly | 5/5 |
+| Long-running standalone script (parallel) | 20s, 325 requests | 0 failures |
+| **Live dashboard server** (parallel) | the actual Express app, poll loop | flaky — 2-4/5 |
+| **Live dashboard server** (sequential) | same app, one request at a time | **5/5, zero errors** |
+
+The contradiction that cracked it: the standalone parallel scripts were fine, but
+the embedding server failed. The difference was not the code — it was process
+**lifetime and background load**. The long-running server was simultaneously:
+
+- handling its own inbound HTTP (morgan showed a request that hung)
+- keeping Mongo + Redis client connections alive
+- firing 5 outbound fetches per poll, every 5 seconds, continuously
+
+That sustained mix kept vpnkit's event pump hot in a way short-lived test
+processes never did. Sequentially issuing one request at a time meant only one
+connection was ever in-flight, so the pump never had a burst to swallow — hence
+stable 5/5.
+
+## Why it won't happen on Linux
+
+On Linux, containers use **kernel networking directly**. Socket creation,
+handshakes, and DNS go straight through the real kernel stack — there is no
+user-space translation layer and no single event pump to saturate. The same
+parallel code runs fine. This is a well-known class of Docker-on-macOS networking
+flakiness (distinct from the commonly reported localhost connection issues).
+
+## Practical takeaways
+
+1. Practically invisible to the 5-replica cluster — replicas never talk to the
+   host network this way; only the dashboard does, to the replicas, and it now
+   polls sequentially.
+2. On a **Linux host** (real server, CI, EC2) the original `Promise.all` version
+   is both faster and reliable — but the sequential version is only marginally
+   slower (~30ms per full poll), so there is no reason to change it back.
+3. This class of bug is why "works in my container but is flaky under continuous
+   load in the same container" deserves an environment check before a code
+   rewrite.

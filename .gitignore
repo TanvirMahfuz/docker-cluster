@@ -1,0 +1,14 @@
+# Node
+node_modules/
+npm-debug.log*
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Dashboard client build
+cluster-dashboard/client/dist/
+
+# OS
+.DS_Store
