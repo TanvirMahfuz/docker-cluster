@@ -38,10 +38,10 @@ app.use('/send-message', rateLimit({
 
 app.get('/health', (req, res) => {
     const dbStates = ['disconnected', 'connected', 'connecting', 'disconnecting'];
-    const dbConnected = mongoose.connection.readyState === 1;
-    res.status(dbConnected ? 200 : 503).json({
+    const dbConnected = mongoose.connection.readyState;
+    res.status(dbConnected === 1 ? 200 : 503).json({
         status: 'UP',
-        database: req.query.full ? { state: dbStates[mongoose.connection.readyState] } : (dbConnected ? 'UP' : 'DOWN')
+        database: { state: dbStates[dbConnected] }
     });
 });
 
@@ -103,8 +103,8 @@ mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/mydatabase'
     .then(async () => {
         console.log('Connected to MongoDB');
         await seedUsers();
-        app.listen(PORT, () => {
-            console.log(`Server is running on port http://localhost:${PORT}`);
-        });
     })
     .catch(err => console.error('Could not connect to MongoDB', err));
+app.listen(PORT, () => {
+    console.log(`Server is running on port http://localhost:${PORT}`);
+});
